@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Folded note sheet -->
+    <path
+        android:fillColor="#232329"
+        android:pathData="M36,28 L62,28 L72,38 L72,78 L36,78 Z" />
+    <path
+        android:fillColor="#383842"
+        android:pathData="M62,28 L62,38 L72,38 Z" />
+
+    <!-- Subtle note text bars -->
+    <path
+        android:fillColor="#555563"
+        android:pathData="M43,43 H59 V46 H43 Z" />
+    <path
+        android:fillColor="#555563"
+        android:pathData="M43,50 H65 V53 H43 Z" />
+
+    <!-- Outer crimson flame -->
+    <path
+        android:fillColor="#E53935"
+        android:pathData="M54,48 C54,48 66,58 66,68 C66,75 60.6,80 54,80 C47.4,80 42,75 42,68 C42,63 45,58 48,55 C48,59 50,60 50,60 C50,55 54,48 54,48 Z" />
+
+    <!-- Inner ember core -->
+    <path
+        android:fillColor="#FF8F00"
+        android:pathData="M54,60 C54,60 60,65 60,70.5 C60,74 57.3,76.5 54,76.5 C50.7,76.5 48,74 48,70.5 C48,66.5 54,60 54,60 Z" />
+</vector>
