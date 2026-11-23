@@ -3,6 +3,7 @@ package com.example.burnnote
 import android.graphics.Paint
 import android.graphics.Typeface
 import android.os.SystemClock
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -13,6 +14,8 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -39,21 +42,21 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlin.math.sin
 
-private const val TOTAL_DURATION_MS = 30_000L // Layer 2: 30-second window
+private const val TOTAL_DURATION_MS = 30_000L
 
 @Composable
 fun SecureReaderScreen(
     buffer: SecretNoteBuffer?,
     deviceWatermark: String,
     burnReason: String?,
-    onBurnTriggered: (String) -> Unit
+    onBurnTriggered: (String) -> Unit,
+    onExit: () -> Unit
 ) {
     var remainingMs by remember { mutableLongStateOf(TOTAL_DURATION_MS) }
     var isHolding by remember { mutableStateOf(false) }
     var scrollOffsetPx by remember { mutableFloatStateOf(0f) }
     var frameTick by remember { mutableIntStateOf(0) }
 
-    // Layer 2: Monotonic 30-second countdown (immune to device clock tampering)
     LaunchedEffect(burnReason) {
         if (burnReason != null) return@LaunchedEffect
         val startElapsed = SystemClock.elapsedRealtime()
@@ -68,7 +71,6 @@ fun SecureReaderScreen(
         }
     }
 
-    // Layer 5: Frame-synced loop for temporal dithering + subtle micro-motion
     LaunchedEffect(isHolding, burnReason) {
         while (isActive && isHolding && burnReason == null) {
             withFrameNanos {
@@ -79,16 +81,16 @@ fun SecureReaderScreen(
 
     val textPaint = remember {
         Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color(0xFFB8B8B8).toArgb() // Dim high-contrast off-white for dark render
-            textSize = 46f
+            color = Color(0xFFB8B8B8).toArgb()
+            textSize = 44f
             typeface = Typeface.MONOSPACE
-            letterSpacing = 0.04f
+            letterSpacing = 0.03f
         }
     }
 
     val watermarkPaint = remember {
         Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color(0x18FFFFFF).toArgb() // Faint forensic overlay
+            color = Color(0x18FFFFFF).toArgb()
             textSize = 30f
             typeface = Typeface.MONOSPACE
         }
@@ -98,7 +100,6 @@ fun SecureReaderScreen(
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black)
-            // Layer 7: Hold-to-read + clamped slow scroll (no fling, no jump)
             .pointerInput(burnReason) {
                 if (burnReason != null) return@pointerInput
                 awaitEachGesture {
@@ -112,7 +113,6 @@ fun SecureReaderScreen(
                             val rawDelta = activePointer.position.y - lastY
                             lastY = activePointer.position.y
 
-                            // Clamp per-event movement to enforce slow single-line progression
                             val clampedDelta = rawDelta.coerceIn(-10f, 10f)
                             val lineCount = buffer?.getLines()?.size ?: 0
                             val maxScroll = ((lineCount - 1).coerceAtLeast(0)) * 120f
@@ -121,18 +121,16 @@ fun SecureReaderScreen(
                             activePointer.consume()
                         }
                     } finally {
-                        // Instant blackout the moment the finger lifts
                         isHolding = false
                     }
                 }
             }
     ) {
         if (burnReason != null) {
-            BurnedView(reason = burnReason)
+            BurnedView(reason = burnReason, onExit = onExit)
         } else {
             val lines = buffer?.getLines().orEmpty()
 
-            // Top minimal countdown header
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -157,9 +155,11 @@ fun SecureReaderScreen(
             Canvas(modifier = Modifier.fillMaxSize()) {
                 val centerY = size.height / 2f
                 val lineSpacingPx = 120f
-                val slitHalfHeight = 52f // Exposes strictly one line at a time
+                val slitHalfHeight = 52f
 
-                // Draw aperture guide lines
+                // Scale text size dynamically so 26 monospace chars always fit screen width
+                textPaint.textSize = ((size.width - 96f) / (26f * 0.64f)).coerceIn(28f, 48f)
+
                 val guideColor = if (isHolding) Color(0xFF222222) else Color(0xFF141414)
                 drawLine(
                     color = guideColor,
@@ -174,7 +174,6 @@ fun SecureReaderScreen(
                     strokeWidth = 2f
                 )
 
-                // Render secret text strictly inside the single-line slit while holding
                 if (isHolding && lines.isNotEmpty()) {
                     val jitterX = sin(frameTick * 0.55f) * 1.8f
                     val jitterY = sin(frameTick * 0.35f) * 0.9f
@@ -200,7 +199,6 @@ fun SecureReaderScreen(
                             }
                         }
 
-                        // Layer 5: Temporal alternating micro-scanlines (human eye blends; camera shutters slice)
                         val barStep = 4f
                         var y = (centerY - slitHalfHeight) + (phase * 2f)
                         while (y < centerY + slitHalfHeight) {
@@ -215,7 +213,6 @@ fun SecureReaderScreen(
                     }
                 }
 
-                // Layer 6: Diagonal tiled device watermark over the entire viewport
                 val native = drawContext.canvas.nativeCanvas
                 native.save()
                 native.rotate(-30f, size.width / 2f, size.height / 2f)
@@ -237,7 +234,7 @@ fun SecureReaderScreen(
 }
 
 @Composable
-private fun BurnedView(reason: String) {
+private fun BurnedView(reason: String, onExit: () -> Unit) {
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -257,7 +254,19 @@ private fun BurnedView(reason: String) {
             color = Color(0xFF555555),
             fontSize = 13.sp,
             fontFamily = FontFamily.Monospace,
-            modifier = Modifier.padding(top = 12.dp)
+            modifier = Modifier.padding(top = 12.dp, bottom = 28.dp)
         )
+        OutlinedButton(
+            onClick = onExit,
+            border = BorderStroke(1.dp, Color(0xFF33333A)),
+            shape = RoundedCornerShape(8.dp)
+        ) {
+            Text(
+                text = "RETURN HOME",
+                color = Color(0xFFB8B8B8),
+                fontFamily = FontFamily.Monospace,
+                fontSize = 12.sp
+            )
+        }
     }
 }
