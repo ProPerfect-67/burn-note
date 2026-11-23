@@ -9,51 +9,45 @@ import androidx.activity.compose.setContent
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import java.nio.ByteBuffer
+import java.nio.charset.CodingErrorAction
 import java.security.MessageDigest
 import java.util.function.Consumer
 
 /**
- * In-memory handoff so secret text never touches Android Intent IPC bundles.
- * Automatically word-wraps long text into single-slit lines (~26 chars).
+ * In-memory handoff so decrypted notes never touch Android Intent bundles
+ * or immutable Strings, and auto-wrap cleanly into single-slit lines.
  */
 object VolatileNoteHandoff {
     private var pendingLines: List<CharArray>? = null
 
     fun stage(rawText: String, maxCharsPerLine: Int = 26) {
-        clear()
-        val wrapped = mutableListOf<CharArray>()
-        for (paragraph in rawText.replace("\r\n", "\n").split("\n")) {
-            if (paragraph.isBlank()) {
-                wrapped.add(" ".toCharArray())
-                continue
-            }
-            var current = StringBuilder()
-            for (word in paragraph.trim().split(Regex("\\s+"))) {
-                if (word.length > maxCharsPerLine) {
-                    if (current.isNotEmpty()) {
-                        wrapped.add(current.toString().toCharArray())
-                        current = StringBuilder()
-                    }
-                    var i = 0
-                    while (i < word.length) {
-                        val end = (i + maxCharsPerLine).coerceAtMost(word.length)
-                        wrapped.add(word.substring(i, end).toCharArray())
-                        i = end
-                    }
-                } else if (current.isEmpty()) {
-                    current.append(word)
-                } else if (current.length + 1 + word.length <= maxCharsPerLine) {
-                    current.append(' ').append(word)
-                } else {
-                    wrapped.add(current.toString().toCharArray())
-                    current = StringBuilder(word)
-                }
-            }
-            if (current.isNotEmpty()) {
-                wrapped.add(current.toString().toCharArray())
-            }
+        val chars = rawText.toCharArray()
+        try {
+            clear()
+            pendingLines = wrapCharArray(chars, maxCharsPerLine)
+        } finally {
+            chars.fill('\u0000')
         }
-        pendingLines = wrapped.ifEmpty { listOf("(empty note)".toCharArray()) }
+    }
+
+    fun stageUtf8Bytes(rawBytes: ByteArray, maxCharsPerLine: Int = 26) {
+        var decodedChars: CharArray? = null
+        try {
+            clear()
+            val charBuf = Charsets.UTF_8.newDecoder()
+                .onMalformedInput(CodingErrorAction.REPLACE)
+                .onUnmappableCharacter(CodingErrorAction.REPLACE)
+                .decode(ByteBuffer.wrap(rawBytes))
+
+            decodedChars = CharArray(charBuf.remaining()).also { charBuf.get(it) }
+            if (charBuf.hasArray()) charBuf.array().fill('\u0000')
+
+            pendingLines = wrapCharArray(decodedChars, maxCharsPerLine)
+        } finally {
+            rawBytes.fill(0)
+            decodedChars?.fill('\u0000')
+        }
     }
 
     fun consume(): List<CharArray>? {
@@ -65,6 +59,82 @@ object VolatileNoteHandoff {
     fun clear() {
         pendingLines?.forEach { it.fill('\u0000') }
         pendingLines = null
+    }
+
+    private fun wrapCharArray(chars: CharArray, maxCharsPerLine: Int): List<CharArray> {
+        val wrapped = mutableListOf<CharArray>()
+        var lineStart = 0
+        val n = chars.size
+
+        while (lineStart <= n) {
+            var lineEnd = lineStart
+            while (lineEnd < n && chars[lineEnd] != '\n') {
+                lineEnd++
+            }
+            val effectiveEnd = if (lineEnd > lineStart && chars[lineEnd - 1] == '\r') {
+                lineEnd - 1
+            } else {
+                lineEnd
+            }
+
+            val words = mutableListOf<IntRange>()
+            var i = lineStart
+            while (i < effectiveEnd) {
+                while (i < effectiveEnd && chars[i].isWhitespace()) i++
+                val wStart = i
+                while (i < effectiveEnd && !chars[i].isWhitespace()) i++
+                if (i > wStart) {
+                    words.add(wStart until i)
+                }
+            }
+
+            if (words.isEmpty()) {
+                if (lineStart < n) {
+                    wrapped.add(" ".toCharArray())
+                }
+            } else {
+                val currentLine = CharArray(maxCharsPerLine)
+                var currentLen = 0
+
+                for (word in words) {
+                    val wStart = word.first
+                    val wLen = word.last - word.first + 1
+                    if (wLen > maxCharsPerLine) {
+                        if (currentLen > 0) {
+                            wrapped.add(currentLine.copyOf(currentLen))
+                            currentLen = 0
+                        }
+                        var pos = wStart
+                        val wEndExclusive = wStart + wLen
+                        while (pos < wEndExclusive) {
+                            val chunkLen = (wEndExclusive - pos).coerceAtMost(maxCharsPerLine)
+                            wrapped.add(chars.copyOfRange(pos, pos + chunkLen))
+                            pos += chunkLen
+                        }
+                    } else if (currentLen == 0) {
+                        System.arraycopy(chars, wStart, currentLine, 0, wLen)
+                        currentLen = wLen
+                    } else if (currentLen + 1 + wLen <= maxCharsPerLine) {
+                        currentLine[currentLen] = ' '
+                        System.arraycopy(chars, wStart, currentLine, currentLen + 1, wLen)
+                        currentLen += 1 + wLen
+                    } else {
+                        wrapped.add(currentLine.copyOf(currentLen))
+                        System.arraycopy(chars, wStart, currentLine, 0, wLen)
+                        currentLen = wLen
+                    }
+                }
+                if (currentLen > 0) {
+                    wrapped.add(currentLine.copyOf(currentLen))
+                }
+                currentLine.fill('\u0000')
+            }
+
+            if (lineEnd >= n) break
+            lineStart = lineEnd + 1
+        }
+
+        return wrapped.ifEmpty { listOf("(empty note)".toCharArray()) }
     }
 }
 
