@@ -13,9 +13,61 @@ import java.security.MessageDigest
 import java.util.function.Consumer
 
 /**
- * Holds decrypted note lines as mutable CharArrays so they can be
- * overwritten with null bytes immediately on burn (Layer 1).
+ * In-memory handoff so secret text never touches Android Intent IPC bundles.
+ * Automatically word-wraps long text into single-slit lines (~26 chars).
  */
+object VolatileNoteHandoff {
+    private var pendingLines: List<CharArray>? = null
+
+    fun stage(rawText: String, maxCharsPerLine: Int = 26) {
+        clear()
+        val wrapped = mutableListOf<CharArray>()
+        for (paragraph in rawText.replace("\r\n", "\n").split("\n")) {
+            if (paragraph.isBlank()) {
+                wrapped.add(" ".toCharArray())
+                continue
+            }
+            var current = StringBuilder()
+            for (word in paragraph.trim().split(Regex("\\s+"))) {
+                if (word.length > maxCharsPerLine) {
+                    if (current.isNotEmpty()) {
+                        wrapped.add(current.toString().toCharArray())
+                        current = StringBuilder()
+                    }
+                    var i = 0
+                    while (i < word.length) {
+                        val end = (i + maxCharsPerLine).coerceAtMost(word.length)
+                        wrapped.add(word.substring(i, end).toCharArray())
+                        i = end
+                    }
+                } else if (current.isEmpty()) {
+                    current.append(word)
+                } else if (current.length + 1 + word.length <= maxCharsPerLine) {
+                    current.append(' ').append(word)
+                } else {
+                    wrapped.add(current.toString().toCharArray())
+                    current = StringBuilder(word)
+                }
+            }
+            if (current.isNotEmpty()) {
+                wrapped.add(current.toString().toCharArray())
+            }
+        }
+        pendingLines = wrapped.ifEmpty { listOf("(empty note)".toCharArray()) }
+    }
+
+    fun consume(): List<CharArray>? {
+        val data = pendingLines
+        pendingLines = null
+        return data
+    }
+
+    fun clear() {
+        pendingLines?.forEach { it.fill('\u0000') }
+        pendingLines = null
+    }
+}
+
 class SecretNoteBuffer(rawLines: List<CharArray>) {
     private val lines = rawLines.toMutableList()
 
@@ -40,18 +92,15 @@ class SecureNoteActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Layer 4: Block screenshots, recordings, casting, and task-switcher previews
         window.setFlags(
             WindowManager.LayoutParams.FLAG_SECURE,
             WindowManager.LayoutParams.FLAG_SECURE
         )
 
-        // Layer 3: Dark render — force window brightness to minimum (no extra permission needed)
         window.attributes = window.attributes.apply {
             screenBrightness = 0.01f
         }
 
-        // Extra hardening: block overlays (Android 12+) & recents thumbnails (Android 13+)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             window.setHideOverlayWindows(true)
         }
@@ -59,19 +108,13 @@ class SecureNoteActivity : ComponentActivity() {
             setRecentsScreenshotEnabled(false)
         }
 
-        // Demo payload (replace with decrypted libsodium output in production)
-        noteBuffer = SecretNoteBuffer(
-            listOf(
-                "TOP SECRET // BURN AFTER READING".toCharArray(),
-                "Meeting moved to Gate 4 at 19:30.".toCharArray(),
-                "Access code for the locker: 84-19-07.".toCharArray(),
-                "Do not reply on regular messaging apps.".toCharArray(),
-                "Confirm receipt by nodding once.".toCharArray(),
-                "This note self-destructs permanently.".toCharArray()
-            )
-        )
+        val staged = VolatileNoteHandoff.consume()
+        if (staged == null) {
+            burnReason = "NO_NOTE_PAYLOAD"
+        } else {
+            noteBuffer = SecretNoteBuffer(staged)
+        }
 
-        // Layer 6: Short recipient device watermark hash (replace with Keystore/Account ID in prod)
         val deviceTag = generateShortDeviceTag()
 
         setContent {
@@ -79,7 +122,11 @@ class SecureNoteActivity : ComponentActivity() {
                 buffer = noteBuffer,
                 deviceWatermark = deviceTag,
                 burnReason = burnReason,
-                onBurnTriggered = { reason -> burnNote(reason) }
+                onBurnTriggered = { reason -> burnNote(reason) },
+                onExit = {
+                    burnNote("CLOSED_BY_USER")
+                    finish()
+                }
             )
         }
     }
@@ -92,14 +139,18 @@ class SecureNoteActivity : ComponentActivity() {
     override fun onStop() {
         super.onStop()
         unregisterCaptureDetectors()
-        // Burn immediately if user leaves the app (prevents background inspection / second open)
         if (burnReason == null) {
             burnNote("APP_BACKGROUNDED")
         }
     }
 
+    override fun onDestroy() {
+        super.onDestroy()
+        noteBuffer?.wipe()
+        noteBuffer = null
+    }
+
     private fun registerCaptureDetectors() {
-        // Android 14+: Detect blocked screenshot attempts -> wipe + sender alert
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             val cb = ScreenCaptureCallback {
                 burnNote("SCREENSHOT_ATTEMPT")
@@ -109,7 +160,6 @@ class SecureNoteActivity : ComponentActivity() {
             registerScreenCaptureCallback(mainExecutor, cb)
         }
 
-        // Android 15+: Detect active or newly started MediaProjection screen recording
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.VANILLA_ICE_CREAM) {
             val cb = Consumer<Int> { state ->
                 if (state == WindowManager.SCREEN_RECORDING_STATE_VISIBLE) {
@@ -145,7 +195,6 @@ class SecureNoteActivity : ComponentActivity() {
     }
 
     private fun notifySenderAlert(eventType: String) {
-        // Hook for your backend WebSocket / FCM alert endpoint
         android.util.Log.w("BurnNoteSecurity", "Sender alert queued: $eventType")
     }
 
