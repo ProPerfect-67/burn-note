@@ -1,8 +1,8 @@
 package com.example.burnnote
 
+import android.content.Context
 import android.content.Intent
 import android.os.Bundle
-import android.util.Base64
 import android.view.WindowManager
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -48,6 +49,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import javax.crypto.AEADBadTagException
 
 private enum class AppScreen {
     HOME, WRITE, OPEN
@@ -57,6 +59,7 @@ private val BgBlack = Color(0xFF09090B)
 private val CardDark = Color(0xFF141418)
 private val BorderDim = Color(0xFF27272E)
 private val Crimson = Color(0xFFD93838)
+private val Emerald = Color(0xFF1F9D6B)
 private val TextPrimary = Color(0xFFE4E4E7)
 private val TextMuted = Color(0xFF71717A)
 
@@ -65,7 +68,6 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Keep FLAG_SECURE active even on Home/Write so drafts cannot be screenshotted
         window.setFlags(
             WindowManager.LayoutParams.FLAG_SECURE,
             WindowManager.LayoutParams.FLAG_SECURE
@@ -73,8 +75,12 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             BurnNoteApp(
-                onLaunchSecureReader = { rawText ->
+                onLaunchSecureReaderText = { rawText ->
                     VolatileNoteHandoff.stage(rawText)
+                    startActivity(Intent(this, SecureNoteActivity::class.java))
+                },
+                onLaunchSecureReaderBytes = { plainBytes ->
+                    VolatileNoteHandoff.stageUtf8Bytes(plainBytes)
                     startActivity(Intent(this, SecureNoteActivity::class.java))
                 }
             )
@@ -82,8 +88,19 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+private fun shareText(context: Context, title: String, content: String) {
+    val intent = Intent(Intent.ACTION_SEND).apply {
+        type = "text/plain"
+        putExtra(Intent.EXTRA_TEXT, content)
+    }
+    context.startActivity(Intent.createChooser(intent, title))
+}
+
 @Composable
-private fun BurnNoteApp(onLaunchSecureReader: (String) -> Unit) {
+private fun BurnNoteApp(
+    onLaunchSecureReaderText: (String) -> Unit,
+    onLaunchSecureReaderBytes: (ByteArray) -> Unit
+) {
     var currentScreen by remember { mutableStateOf(AppScreen.HOME) }
 
     BackHandler(enabled = currentScreen != AppScreen.HOME) {
@@ -103,7 +120,7 @@ private fun BurnNoteApp(onLaunchSecureReader: (String) -> Unit) {
                 onWriteClick = { currentScreen = AppScreen.WRITE },
                 onOpenClick = { currentScreen = AppScreen.OPEN },
                 onSandboxClick = {
-                    onLaunchSecureReader(
+                    onLaunchSecureReaderText(
                         "TOP SECRET // BURN AFTER READING\n" +
                             "Meeting moved to Gate 4 at 19:30.\n" +
                             "Access code for the locker: 84-19-07.\n" +
@@ -113,13 +130,12 @@ private fun BurnNoteApp(onLaunchSecureReader: (String) -> Unit) {
             )
 
             AppScreen.WRITE -> WriteNoteScreen(
-                onBack = { currentScreen = AppScreen.HOME },
-                onPreviewInReader = { text -> onLaunchSecureReader(text) }
+                onBack = { currentScreen = AppScreen.HOME }
             )
 
             AppScreen.OPEN -> OpenNoteScreen(
                 onBack = { currentScreen = AppScreen.HOME },
-                onOpenDecoded = { text -> onLaunchSecureReader(text) }
+                onDecryptedBytes = { bytes -> onLaunchSecureReaderBytes(bytes) }
             )
         }
     }
@@ -147,7 +163,7 @@ private fun HomeScreen(
                 letterSpacing = 2.sp
             )
             Text(
-                text = "7-LAYER EPHEMERAL READER",
+                text = "7-LAYER ENCRYPTED READER",
                 color = TextMuted,
                 fontSize = 12.sp,
                 fontFamily = FontFamily.Monospace,
@@ -166,7 +182,7 @@ private fun HomeScreen(
                     .height(56.dp)
             ) {
                 Text(
-                    text = "WRITE A BURN NOTE",
+                    text = "ENCRYPT A BURN NOTE",
                     color = Color.White,
                     fontFamily = FontFamily.Monospace,
                     fontWeight = FontWeight.Bold,
@@ -183,7 +199,7 @@ private fun HomeScreen(
                     .height(56.dp)
             ) {
                 Text(
-                    text = "OPEN A BURN CODE",
+                    text = "DECRYPT & OPEN NOTE",
                     color = TextPrimary,
                     fontFamily = FontFamily.Monospace,
                     fontWeight = FontWeight.SemiBold,
@@ -216,14 +232,14 @@ private fun HomeScreen(
         ) {
             Column(modifier = Modifier.padding(14.dp)) {
                 Text(
-                    text = "ACTIVE PROTECTIONS",
+                    text = "ACTIVE PROTECTIONS (PHASE 2)",
                     color = TextPrimary,
                     fontSize = 11.sp,
                     fontFamily = FontFamily.Monospace,
                     fontWeight = FontWeight.Bold
                 )
                 Text(
-                    text = "FLAG_SECURE • Dark Render • 30s Timer • Anti-Camera Mask • Device Watermark • Single-Line Slit",
+                    text = "AES-256-GCM • Split One-Time Key • Local Burn Ledger • FLAG_SECURE • Dark Render • 30s Timer • Anti-Camera Mask • Device Watermark • Single-Line Slit",
                     color = TextMuted,
                     fontSize = 11.sp,
                     fontFamily = FontFamily.Monospace,
@@ -236,14 +252,11 @@ private fun HomeScreen(
 }
 
 @Composable
-private fun WriteNoteScreen(
-    onBack: () -> Unit,
-    onPreviewInReader: (String) -> Unit
-) {
+private fun WriteNoteScreen(onBack: () -> Unit) {
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
     var draftText by remember { mutableStateOf("") }
-    var generatedCode by remember { mutableStateOf<String?>(null) }
+    var bundle by remember { mutableStateOf<EncryptedBundle?>(null) }
 
     Column(
         modifier = Modifier
@@ -252,135 +265,199 @@ private fun WriteNoteScreen(
             .padding(24.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        ScreenHeader(title = "WRITE NOTE", onBack = onBack)
+        ScreenHeader(title = "ENCRYPT NOTE", onBack = onBack)
 
-        OutlinedTextField(
-            value = draftText,
-            onValueChange = {
-                if (it.length <= 600) {
-                    draftText = it
-                    generatedCode = null
-                }
-            },
-            placeholder = {
+        if (bundle == null) {
+            OutlinedTextField(
+                value = draftText,
+                onValueChange = { if (it.length <= 600) draftText = it },
+                placeholder = {
+                    Text(
+                        text = "Type your secret message...\nEncrypted locally with a fresh 256-bit one-time key.",
+                        color = TextMuted,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 13.sp
+                    )
+                },
+                minLines = 6,
+                maxLines = 10,
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedTextColor = TextPrimary,
+                    unfocusedTextColor = TextPrimary,
+                    focusedBorderColor = Crimson,
+                    unfocusedBorderColor = BorderDim,
+                    cursorColor = Crimson,
+                    focusedContainerColor = CardDark,
+                    unfocusedContainerColor = CardDark
+                ),
+                modifier = Modifier.fillMaxWidth()
+            )
+
+            Text(
+                text = "${draftText.length} / 600 chars",
+                color = TextMuted,
+                fontSize = 11.sp,
+                fontFamily = FontFamily.Monospace,
+                modifier = Modifier.align(Alignment.End)
+            )
+
+            Button(
+                onClick = {
+                    val trimmed = draftText.trim()
+                    if (trimmed.isNotEmpty()) {
+                        val chars = trimmed.toCharArray()
+                        // Wipe draft input immediately once encrypted
+                        draftText = ""
+                        bundle = BurnCrypto.encrypt(chars)
+                    }
+                },
+                enabled = draftText.isNotBlank(),
+                colors = ButtonDefaults.buttonColors(containerColor = Crimson),
+                shape = RoundedCornerShape(10.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(54.dp)
+            ) {
                 Text(
-                    text = "Type your secret message...\nIt auto-wraps for the single-line reader.",
-                    color = TextMuted,
+                    text = "ENCRYPT & GENERATE ONE-TIME KEY",
+                    color = Color.White,
                     fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold,
                     fontSize = 13.sp
                 )
-            },
-            minLines = 6,
-            maxLines = 10,
-            colors = OutlinedTextFieldDefaults.colors(
-                focusedTextColor = TextPrimary,
-                unfocusedTextColor = TextPrimary,
-                focusedBorderColor = Crimson,
-                unfocusedBorderColor = BorderDim,
-                cursorColor = Crimson,
-                focusedContainerColor = CardDark,
-                unfocusedContainerColor = CardDark
-            ),
-            modifier = Modifier.fillMaxWidth()
-        )
+            }
+        } else {
+            val active = bundle!!
 
-        Text(
-            text = "${draftText.length} / 600 chars",
-            color = TextMuted,
-            fontSize = 11.sp,
-            fontFamily = FontFamily.Monospace,
-            modifier = Modifier.align(Alignment.End)
-        )
-
-        Button(
-            onClick = {
-                val trimmed = draftText.trim()
-                if (trimmed.isNotEmpty()) {
-                    val encoded = Base64.encodeToString(
-                        trimmed.toByteArray(Charsets.UTF_8),
-                        Base64.NO_WRAP
-                    )
-                    generatedCode = "BURN1:$encoded"
-                }
-            },
-            enabled = draftText.isNotBlank(),
-            colors = ButtonDefaults.buttonColors(containerColor = Crimson),
-            shape = RoundedCornerShape(10.dp),
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(52.dp)
-        ) {
             Text(
-                text = "GENERATE BURN CODE",
-                color = Color.White,
+                text = "Plaintext wiped from screen. Send Part 1 and Part 2 separately for maximum safety.",
+                color = Emerald,
+                fontSize = 12.sp,
+                fontFamily = FontFamily.Monospace,
+                lineHeight = 17.sp
+            )
+
+            // Part 1: Encrypted Ciphertext
+            SecretOutputCard(
+                label = "PART 1 // ENCRYPTED NOTE (ID ${active.noteId.take(6)})",
+                accent = Crimson,
+                value = active.cipherCode,
+                onCopy = {
+                    clipboard.setText(AnnotatedString(active.cipherCode))
+                    Toast.makeText(context, "Encrypted note copied", Toast.LENGTH_SHORT).show()
+                },
+                onShare = { shareText(context, "Share Encrypted Note", active.cipherCode) }
+            )
+
+            // Part 2: One-Time Key
+            SecretOutputCard(
+                label = "PART 2 // ONE-TIME KEY (DESTROY AFTER SENDING)",
+                accent = Emerald,
+                value = active.oneTimeKey,
+                onCopy = {
+                    clipboard.setText(AnnotatedString(active.oneTimeKey))
+                    Toast.makeText(context, "One-time key copied", Toast.LENGTH_SHORT).show()
+                },
+                onShare = { shareText(context, "Share One-Time Key", active.oneTimeKey) }
+            )
+
+            OutlinedButton(
+                onClick = {
+                    val combined = "${active.cipherCode}\n${active.oneTimeKey}"
+                    clipboard.setText(AnnotatedString(combined))
+                    Toast.makeText(context, "Note + Key copied together (for quick testing)", Toast.LENGTH_SHORT).show()
+                },
+                border = BorderStroke(1.dp, BorderDim),
+                shape = RoundedCornerShape(10.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(46.dp)
+            ) {
+                Text(
+                    text = "COPY BOTH (QUICK SELF-TEST)",
+                    color = TextMuted,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 11.sp
+                )
+            }
+
+            Button(
+                onClick = { bundle = null },
+                colors = ButtonDefaults.buttonColors(containerColor = BorderDim),
+                shape = RoundedCornerShape(10.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(48.dp)
+            ) {
+                Text(
+                    text = "WIPE & WRITE ANOTHER",
+                    color = TextPrimary,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 12.sp
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun SecretOutputCard(
+    label: String,
+    accent: Color,
+    value: String,
+    onCopy: () -> Unit,
+    onShare: () -> Unit
+) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = CardDark),
+        border = BorderStroke(1.dp, accent),
+        shape = RoundedCornerShape(10.dp),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(modifier = Modifier.padding(14.dp)) {
+            Text(
+                text = label,
+                color = accent,
+                fontSize = 10.sp,
                 fontFamily = FontFamily.Monospace,
                 fontWeight = FontWeight.Bold
             )
-        }
-
-        OutlinedButton(
-            onClick = {
-                val trimmed = draftText.trim()
-                if (trimmed.isNotEmpty()) {
-                    draftText = ""
-                    generatedCode = null
-                    onPreviewInReader(trimmed)
-                }
-            },
-            enabled = draftText.isNotBlank(),
-            border = BorderStroke(1.dp, BorderDim),
-            shape = RoundedCornerShape(10.dp),
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(48.dp)
-        ) {
             Text(
-                text = "OPEN DIRECTLY IN SECURE READER",
+                text = value,
                 color = TextPrimary,
+                fontSize = 11.sp,
                 fontFamily = FontFamily.Monospace,
-                fontSize = 12.sp
+                maxLines = 3,
+                modifier = Modifier.padding(top = 8.dp, bottom = 12.dp)
             )
-        }
-
-        generatedCode?.let { code ->
-            Card(
-                colors = CardDefaults.cardColors(containerColor = CardDark),
-                border = BorderStroke(1.dp, Crimson),
-                shape = RoundedCornerShape(10.dp),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(modifier = Modifier.padding(14.dp)) {
+            Row(modifier = Modifier.fillMaxWidth()) {
+                Button(
+                    onClick = onCopy,
+                    colors = ButtonDefaults.buttonColors(containerColor = BorderDim),
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
                     Text(
-                        text = "PHASE 1 PREVIEW CODE (ENCRYPTION IN PHASE 2)",
-                        color = Crimson,
-                        fontSize = 10.sp,
-                        fontFamily = FontFamily.Monospace,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Text(
-                        text = code,
+                        text = "COPY",
                         color = TextPrimary,
-                        fontSize = 12.sp,
                         fontFamily = FontFamily.Monospace,
-                        maxLines = 4,
-                        modifier = Modifier.padding(top = 8.dp, bottom = 12.dp)
+                        fontSize = 12.sp
                     )
-                    Button(
-                        onClick = {
-                            clipboard.setText(AnnotatedString(code))
-                            Toast.makeText(context, "Burn code copied", Toast.LENGTH_SHORT).show()
-                        },
-                        colors = ButtonDefaults.buttonColors(containerColor = BorderDim),
-                        shape = RoundedCornerShape(8.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text(
-                            text = "COPY CODE",
-                            color = TextPrimary,
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 12.sp
-                        )
-                    }
+                }
+                Spacer(modifier = Modifier.width(10.dp))
+                OutlinedButton(
+                    onClick = onShare,
+                    border = BorderStroke(1.dp, accent),
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text(
+                        text = "SHARE",
+                        color = accent,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 12.sp
+                    )
                 }
             }
         }
@@ -390,42 +467,59 @@ private fun WriteNoteScreen(
 @Composable
 private fun OpenNoteScreen(
     onBack: () -> Unit,
-    onOpenDecoded: (String) -> Unit
+    onDecryptedBytes: (ByteArray) -> Unit
 ) {
+    val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
-    var inputCode by remember { mutableStateOf("") }
+    var inputCipher by remember { mutableStateOf("") }
+    var inputKey by remember { mutableStateOf("") }
     var errorMsg by remember { mutableStateOf<String?>(null) }
+
+    fun smartPaste(raw: String) {
+        val lines = raw.trim().lines().map { it.trim() }.filter { it.isNotEmpty() }
+        var matched = false
+        for (line in lines) {
+            if (line.startsWith("BURN2:")) {
+                inputCipher = line
+                matched = true
+            } else if (line.startsWith("KEY2:")) {
+                inputKey = line
+                matched = true
+            }
+        }
+        if (!matched) {
+            if (inputCipher.isBlank()) inputCipher = raw.trim() else inputKey = raw.trim()
+        }
+        errorMsg = null
+    }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
             .padding(24.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
+        verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        ScreenHeader(title = "OPEN BURN CODE", onBack = onBack)
+        ScreenHeader(title = "DECRYPT NOTE", onBack = onBack)
 
         OutlinedTextField(
-            value = inputCode,
+            value = inputCipher,
             onValueChange = {
-                inputCode = it
+                inputCipher = it
                 errorMsg = null
             },
-            placeholder = {
-                Text(
-                    text = "Paste BURN1:... code here",
-                    color = TextMuted,
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 13.sp
-                )
+            label = {
+                Text("PART 1: ENCRYPTED NOTE (BURN2:...)", fontFamily = FontFamily.Monospace, fontSize = 11.sp)
             },
-            minLines = 4,
-            maxLines = 8,
+            minLines = 3,
+            maxLines = 5,
             colors = OutlinedTextFieldDefaults.colors(
                 focusedTextColor = TextPrimary,
                 unfocusedTextColor = TextPrimary,
                 focusedBorderColor = Crimson,
                 unfocusedBorderColor = BorderDim,
+                focusedLabelColor = Crimson,
+                unfocusedLabelColor = TextMuted,
                 cursorColor = Crimson,
                 focusedContainerColor = CardDark,
                 unfocusedContainerColor = CardDark
@@ -433,86 +527,30 @@ private fun OpenNoteScreen(
             modifier = Modifier.fillMaxWidth()
         )
 
-        OutlinedButton(
-            onClick = {
-                val pasted = clipboard.getText()?.text
-                if (!pasted.isNullOrBlank()) {
-                    inputCode = pasted.trim()
-                    errorMsg = null
-                }
+        OutlinedTextField(
+            value = inputKey,
+            onValueChange = {
+                inputKey = it
+                errorMsg = null
             },
-            border = BorderStroke(1.dp, BorderDim),
-            shape = RoundedCornerShape(10.dp),
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(46.dp)
-        ) {
-            Text(
-                text = "PASTE FROM CLIPBOARD",
-                color = TextPrimary,
-                fontFamily = FontFamily.Monospace,
-                fontSize = 12.sp
-            )
-        }
-
-        errorMsg?.let { err ->
-            Text(
-                text = err,
-                color = Crimson,
-                fontSize = 12.sp,
-                fontFamily = FontFamily.Monospace
-            )
-        }
-
-        Button(
-            onClick = {
-                val cleaned = inputCode.trim()
-                if (!cleaned.startsWith("BURN1:")) {
-                    errorMsg = "Invalid format. Code must start with BURN1:"
-                } else {
-                    try {
-                        val payload = cleaned.removePrefix("BURN1:")
-                        val decoded = String(Base64.decode(payload, Base64.DEFAULT), Charsets.UTF_8)
-                        inputCode = ""
-                        onOpenDecoded(decoded)
-                    } catch (_: Exception) {
-                        errorMsg = "Corrupted burn code."
-                    }
-                }
+            label = {
+                Text("PART 2: ONE-TIME KEY (KEY2:...)", fontFamily = FontFamily.Monospace, fontSize = 11.sp)
             },
-            enabled = inputCode.isNotBlank(),
-            colors = ButtonDefaults.buttonColors(containerColor = Crimson),
-            shape = RoundedCornerShape(10.dp),
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(54.dp)
+            minLines = 2,
+            maxLines = 3,
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedTextColor = TextPrimary,
+                unfocusedTextColor = TextPrimary,
+                focusedBorderColor = Emerald,
+                unfocusedBorderColor = BorderDim,
+                focusedLabelColor = Emerald,
+                unfocusedLabelColor = TextMuted,
+                cursorColor = Emerald,
+                focusedContainerColor = CardDark,
+                unfocusedContainerColor = CardDark
+            ),
+            modifier = Modifier.fillMaxWidth()
         ) {
-            Text(
-                text = "UNLOCK & START 30s TIMER",
-                color = Color.White,
-                fontFamily = FontFamily.Monospace,
-                fontWeight = FontWeight.Bold
-            )
-        }
-
-        Spacer(modifier = Modifier.height(4.dp))
-        Text(
-            text = "Warning: Screen brightness will drop to minimum and leaving the app immediately destroys the note.",
-            color = TextMuted,
-            fontSize = 11.sp,
-            fontFamily = FontFamily.Monospace,
-            lineHeight = 16.sp
-        )
-    }
-}
-
-@Composable
-private fun ScreenHeader(title: String, onBack: () -> Unit) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween
-    ) {
         OutlinedButton(
             onClick = onBack,
             border = BorderStroke(1.dp, BorderDim),
@@ -533,4 +571,5 @@ private fun ScreenHeader(title: String, onBack: () -> Unit) {
             fontSize = 15.sp
         )
     }
-}
+ }
+        
